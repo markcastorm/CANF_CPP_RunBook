@@ -1,0 +1,69 @@
+Follow the SIMBA pipeline architecture documented in:
+-D:\Projects\SIMBA-RUNBOOKS\AUSFEDGOVCF\Project_information\CLAUDE.md(full technical context)
+((D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\config.py)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\extractor.py)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\file_generator.py)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\main.py)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\orchestrator.py)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\README.md)
+(D:\Projects\SIMBA-RUNBOOKS\LICIPD_Runbook\scraper.py)) so this are the files that make upt the claud.md  read them only if you dont udertand the claude.md file to save tokens
+
+Imanaged to tackle a verry difficult pdf  you can get someideas if you need  to(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\Project_information\Claude.md) (D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\scraper.py)
+(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\orchestrator.py)(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\main.py)(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\file_generator.py)
+(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\extractor.py)(D:\Projects\SIMBA-RUNBOOKS\OIRS_Runbook\config.py)
+
+- D:\Projects\SIMBA-RUNBOOKS\Runbook_RELPRCLVLINDX\Project_information\PIPELINE_PROMPT.md (file skeletons + rules)
+
+Same structure: config.py, scraper.py, extractor.py, file_generator.py, orchestrator.py, main.py
+Same output: DATA .xls, META .xls, ZIP, master CSV update, timestamped + latest folders
+Same environment: Windows dev, Docker Linux production, all packages pre-installed, os.path.join() everywhere
+
+now weare getting started on a new runnbook(D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\CANF_CPP_RunBook.docx) you can use a script to read xslx  you cant read them directly you lack that ability 
+Here is the xlsx version (D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\CANF_CPP_DATA_20260818.xlsx) of the manual data
+csv (D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\CANF_CPP_DATA_20260818.xlsx - DATA.csv)
+Meta  file Learn from the other scripts
+
+analyze them first before we started 
+thistime we will  have the config.py  add the necessary collumns mapinng since the sub headers and headers in the manual data will be exactly the way they are to every output and in the exact arrangemen  since they are absolute unless other wise
+remember they are absolute so store them in the config .py
+(D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\CANF_CPP_DATA_20260818.xlsx - DATA.csv)  analyze these files verry keenly they are verry important  lets get started
+the file is abit straight forward lets get started    i will highly suggest analyze the codes for the previous runbooks code thorough dont reade the claude.md alone get full context
+lets first start with the scraper.py 
+we need to  visit this link using selenium stealth ensure we mimic human clicks   and winreg too ensure it works for linux too other wise if it cant dont use it also ensure also works for headles true too
+lets visit this link
+(https://www.cppinvestments.com/the-fund/our-performance/financial-results/)
+
+visit the site  using selenium steal analyze it first you will see alot of reports  we are interested with (D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\sample.txt) here is the sample txt  of the html 
+learn how to download the pdfs dynamicaly  learn how to navigate the site well  learn how to click the load more see earlier fiscal reports(<div class="load-more-wrapper" style="display: block;">
+		<button class="primary-btn load-more-btn" tabindex="0" data-event="event" data-ga="link-1">
+			Load more		</button>
+	</div>)
+    this s a quaterly runbook so we are inter rested in quaterly we are supposed to go for the latest report Quarterly Reports 
+1st quarter fiscal 2027
+Q1 F2027 Results – Highlights
+2nd quarter fiscal 2027
+Q2 F2027 Results – Highlights) you can see for 2027 date its the latest year in the site  it has 2nd quarter fiscal 2027   as the latest report clicking that link leads us to anew tab wit a pdf viewer page ensure you download that pdf 
+
+our master will aways be our stop gap or we can hae a state .json saving what quater pdfs we have processe 
+ right now i want us to process from 202 to the current quater  so wewill learn to click the load more button download the pdfs from year 2022 to current  
+
+(Fiscal 2022 Quarterly Reports 
+1st quarter fiscal 2022 this
+Q1 F2022 Results – Highlights
+2nd quarter fiscal 2022 this
+Q2 F2022 Results – Highlights
+3rd quarter fiscal 2022  this
+Q3 F2022 Results – Highlights)
+and onwards 
+on the mapping lets look ate the latest quater data (D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\Q2-F27-Financial-Statements-November-10-2026.pdf)
+you can see the table we are looking for (D:\Projects\SIMBA-RUNBOOKS\CANF_CPP_RunBook\Project_information\image.png) first i would suggest we fin the table  use fitz its actualy faster you can see me using it in my other work 
+extraxt the full page to a txt then learn how to extract the pable perfectly and dynamicaly without hard coding in case the pdf style changes  we nned to have learn the mapung by refurring to the sample output  
+the sub headers anre very straight forward they will guid you  so the the extraction will update the master by appending new rows not overitting the existing  rows to avoid contermination the first run we just need to fill the master from 202 to th current quater to laren but oon ward we need to have the pick the latsdata and apend its like a continous motion even if i forget to run the pipline then extime i run it we will need the master to be self healing not  have gaps you get it 
+the output will b esaved in the output folder with timestamped subfolders with latest folder holding only the lates files on every run with a cleanup efect learn from the other pipelines 
+
+
+for bulp rocessig we need workeres and multiprocessing right be inteligent aboutthis and use the wissedly  
+
+
+
+

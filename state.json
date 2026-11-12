@@ -1,0 +1,16 @@
+{
+  "processed_quarters": {
+    "2026-Q2": {
+      "processed_at": "2026-11-12T13:35:27",
+      "pdf_path": "D:\\Projects\\SIMBA-RUNBOOKS\\CANF_CPP_RunBook\\downloads\\20261112_133449\\2026_Q2\\Q1-F27-Financial-Statements-English.pdf",
+      "cpp_fy": 2027,
+      "cpp_quarter": 1
+    },
+    "2026-Q3": {
+      "processed_at": "2026-11-12T13:35:27",
+      "pdf_path": "D:\\Projects\\SIMBA-RUNBOOKS\\CANF_CPP_RunBook\\downloads\\20261112_133449\\2026_Q3\\Q2-F27-Financial-Statements-November-10-2026.pdf",
+      "cpp_fy": 2027,
+      "cpp_quarter": 2
+    }
+  }
+}
