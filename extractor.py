@@ -53,6 +53,11 @@ _SUPERSCRIPT_RE = re.compile(r'[²³¹⁰-⁹]+')
 _YEAR_RE        = re.compile(r'\b(20\d{2})\b')
 _NUMBER_BODY_RE = re.compile(r'^\d+$')
 
+# Standalone footnote markers: Unicode superscripts + common symbols used in
+# financial PDFs (†dagger, ‡double-dagger, §section, *asterisk, •bullet).
+# Expanded beyond digits to handle future CPP PDF format changes.
+_FOOTNOTE_MARKER_RE = re.compile(r'^[¹²³⁰-⁹†‡§\*•]+$')
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -132,10 +137,13 @@ def _find_data_bounds(lines: list[str]) -> tuple[Optional[int], Optional[int]]:
 
     start — first line of portfolio data (old PDFs begin with 'Cash and cash
             equivalents'; newer PDFs begin with 'Equities').
-    end   — the footnote line that terminates the data block.  Three formats:
-            • standalone ASCII digit:    '1'
-            • standalone Unicode super:  '¹'
-            • digit + inline text:       '1 Consists of all the financial…'
+    end   — line that terminates the data block.  Formats handled:
+            • standalone Unicode superscript:  '¹'
+            • standalone footnote symbol:      '†', '‡', '§', '*', '•'
+            • standalone ASCII digit:          '1'
+            • digit/symbol + inline text:      '1 Consists of all the financial…'
+            Fallback: if no footnote marker is found, end = len(lines) (page
+            boundary) so the parser still runs rather than failing silently.
     """
     start = None
     for idx, line in enumerate(lines):
@@ -145,25 +153,34 @@ def _find_data_bounds(lines: list[str]) -> tuple[Optional[int], Optional[int]]:
 
     end = None
     for idx, line in enumerate(lines):
-        # Case 1: standalone Unicode superscript (e.g. '¹')
-        if _SUPERSCRIPT_DIGIT_RE.match(line):
+        # Case 1: standalone Unicode superscript or known footnote symbol
+        if _SUPERSCRIPT_DIGIT_RE.match(line) or _FOOTNOTE_MARKER_RE.match(line):
             if idx + 1 < len(lines) and not _is_number(lines[idx + 1]):
                 end = idx
                 break
 
-        # Case 2: ASCII digit 1–3, standalone or leading an inline footnote
-        m = re.match(r'^([123])\s*(.*)', line)
+        # Case 2: ASCII digit or symbol leading an inline footnote sentence
+        m = re.match(r'^([1-9†‡§\*•])\s*(.*)', line)
         if m:
             rest = m.group(2).strip()
             if rest == '':
-                # standalone ASCII digit: confirm next line is not data
+                # standalone marker: confirm next line is not a data value
                 if idx + 1 < len(lines) and not _is_number(lines[idx + 1]):
                     end = idx
                     break
             elif not _is_number(rest) and len(rest) > 10:
-                # '1 Consists of all the financial…' — clearly a footnote
+                # e.g. '1 Consists of all the financial…' — clearly a footnote
                 end = idx
                 break
+
+    if end is None and start is not None:
+        # No footnote marker found — use page boundary rather than hard-failing.
+        # The parser will ignore any non-data trailing lines naturally.
+        logger.warning(
+            '_find_data_bounds: no footnote marker detected; '
+            'using page end as data boundary — check PDF for new footnote format'
+        )
+        end = len(lines)
 
     return start, end
 
@@ -172,10 +189,15 @@ def _parse_rows(data_lines: list[str]) -> list[tuple[str, int, int]]:
     """
     State-machine parser for the label/value stream.
     Returns list of (normalized_label, col1_value, col2_value).
+
+    'other' rows are tagged as 'other:<section>' (e.g. 'other:investment liabilities')
+    so _map_rows can resolve the right code without fragile ordinal counting.
+    Falls back to plain 'other' only if no section header has been seen yet.
     """
     rows: list[tuple[str, int, int]] = []
-    current_parts: list[str] = []
-    pending_vals:  list[int]  = []
+    current_parts:   list[str] = []
+    pending_vals:    list[int]  = []
+    current_section: str        = ''   # last section header seen
 
     for line in data_lines:
         if line == '$':
@@ -185,6 +207,10 @@ def _parse_rows(data_lines: list[str]) -> list[tuple[str, int, int]]:
             pending_vals.append(_parse_number(line))
             if len(pending_vals) == 2:
                 label = _normalize(' '.join(current_parts))
+                # Tag 'other' with its section so _map_rows can resolve the
+                # correct code without counting ordinal occurrences
+                if label == 'other' and current_section:
+                    label = f'other:{current_section}'
                 rows.append((label, pending_vals[0], pending_vals[1]))
                 current_parts = []
                 pending_vals  = []
@@ -192,7 +218,8 @@ def _parse_rows(data_lines: list[str]) -> list[tuple[str, int, int]]:
             if current_parts and not pending_vals:
                 prev_norm = _normalize(' '.join(current_parts))
                 if prev_norm in SECTION_HEADERS:
-                    current_parts = [line]
+                    current_section = prev_norm   # update section tracker
+                    current_parts   = [line]
                 else:
                     current_parts.append(line)
             else:
@@ -203,16 +230,31 @@ def _parse_rows(data_lines: list[str]) -> list[tuple[str, int, int]]:
 
 
 def _map_rows(rows: list[tuple[str, int, int]]) -> dict[str, list[int]]:
-    """Map (label, v1, v2) triples → {code: [v1, v2]}."""
+    """Map (label, v1, v2) triples → {code: [v1, v2]}.
+
+    Handles two forms of 'other' labels:
+      'other:<section>'  — section-tagged (preferred, produced by _parse_rows)
+      'other'            — untagged fallback: resolve by ordinal count as before
+    """
     data: dict[str, list[int]] = {}
-    other_count = 0
+    other_count  = 0   # fallback counter for plain 'other' (no section tag)
     unmatched: list[str] = []
 
     for label, v1, v2 in rows:
-        if label == 'other':
+        if label.startswith('other:'):
+            section = label.split(':', 1)[1]
+            if 'receivable' in section:
+                code = config.OTHER_ROW_CODES['investment_receivables']
+            else:
+                code = config.OTHER_ROW_CODES['investment_liabilities']
+        elif label == 'other':
+            # Fallback: section tracking did not fire (no section header seen yet)
             key  = 'investment_receivables' if other_count == 0 else 'investment_liabilities'
             code = config.OTHER_ROW_CODES[key]
             other_count += 1
+            logger.debug(
+                '_map_rows: untagged "other" resolved by count (%d) → %s', other_count, key
+            )
         else:
             code = config.ROW_LABEL_TO_CODE.get(label)
 
@@ -225,6 +267,28 @@ def _map_rows(rows: list[tuple[str, int, int]]) -> dict[str, list[int]]:
         logger.warning('Unmatched PDF row labels: %s', unmatched)
 
     return data
+
+
+# ── Extraction quality gate ───────────────────────────────────────────────────
+
+def _validate_extraction_quality(pdf_name: str, data: dict) -> None:
+    """
+    Warn (never raise) when fewer than MIN_EXPECTED_CODES codes are populated.
+
+    FY2022–FY2024 PDFs legitimately omit CPP.INVESTFUNDS, so the practical
+    minimum is 22 for recent PDFs and 21 for older ones.  config.MIN_EXPECTED_CODES
+    is set to 20 to accommodate both without false positives.
+    """
+    populated = len(data)
+    total     = len(config.COLUMN_CODES)
+    if populated < config.MIN_EXPECTED_CODES:
+        logger.warning(
+            'EXTRACTION QUALITY: %s — only %d/%d codes populated '
+            '(threshold: %d).  PDF format may have changed.',
+            pdf_name, populated, total, config.MIN_EXPECTED_CODES,
+        )
+    else:
+        logger.info('%s — %d/%d codes populated', pdf_name, populated, total)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -266,10 +330,8 @@ def extract_pdf(pdf_path: str) -> dict:
     rows = _parse_rows(lines[start:end])
     data = _map_rows(rows)
 
-    logger.info(
-        '%s → %s  fields=%d/%d',
-        Path(pdf_path).name, columns, len(data), len(config.COLUMN_CODES),
-    )
+    _validate_extraction_quality(Path(pdf_path).name, data)
+
     return {'columns': columns, 'data': data}
 
 

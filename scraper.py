@@ -206,31 +206,37 @@ def _quarter_ids(cpp_q_num, cpp_fy):
 
 # ── Page parsing ──────────────────────────────────────────────────────────────
 
-def _collect_quarterly_links(page_source):
+def _make_link_item(link_text, href, q_num, fy):
+    """Build a standard link dict from validated components."""
+    current_q, comparative_q = _quarter_ids(q_num, fy)
+    return {
+        'link_text':      link_text,
+        'pdf_url':        href,
+        'cpp_quarter':    q_num,
+        'cpp_fy':         fy,
+        'quarter_id':     current_q,
+        'comparative_id': comparative_q,
+    }
+
+
+def _links_structural(soup):
     """
-    Parse page HTML and return all quarterly Financial Statement PDF items.
+    Strategy 1 — structural CSS parsing (current primary approach).
 
-    All fiscal-year divs are present in the initial page source (Load more only
-    toggles CSS visibility).  We read hidden divs too so a single page load is
-    sufficient.
-
-    Returns list of dicts sorted oldest quarter first:
-        {link_text, pdf_url, cpp_quarter, cpp_fy, quarter_id, comparative_id}
+    Relies on:
+      <div class="fiscal-wrap" id="fiscal-YYYY">
+        <h3>...Quarterly reports...</h3>
+        <div class="moreInfo">
+          <a href="...pdf">1st quarter fiscal 2027</a>
     """
-    from bs4 import BeautifulSoup
-
-    soup    = BeautifulSoup(page_source, 'html.parser')
     results = []
-
     for wrap in soup.find_all('div', class_='fiscal-wrap'):
         div_id = wrap.get('id', '')
-        m      = re.match(r'^fiscal-(\d{4})$', div_id)
+        m = re.match(r'^fiscal-(\d{4})$', div_id)
         if not m:
             continue
-        fiscal_year_div = int(m.group(1))
-        if fiscal_year_div < config.START_FISCAL_YEAR:
+        if int(m.group(1)) < config.START_FISCAL_YEAR:
             continue
-
         for h3 in wrap.find_all('h3'):
             if 'quarterly reports' not in h3.get_text(strip=True).lower():
                 continue
@@ -242,29 +248,193 @@ def _collect_quarterly_links(page_source):
                 href      = _absolute_url(a['href'])
                 if not href.lower().endswith('.pdf'):
                     continue
-
                 q_num, fy = _parse_quarter_link(link_text)
-                if q_num is None:
+                if q_num is None or fy < config.START_FISCAL_YEAR:
                     continue
-                if fy < config.START_FISCAL_YEAR:
-                    continue
+                results.append(_make_link_item(link_text, href, q_num, fy))
+    results.sort(key=lambda x: (x['cpp_fy'], x['cpp_quarter']))
+    return results
 
-                current_q, comparative_q = _quarter_ids(q_num, fy)
-                results.append({
-                    'link_text':      link_text,
-                    'pdf_url':        href,
-                    'cpp_quarter':    q_num,
-                    'cpp_fy':         fy,
-                    'quarter_id':     current_q,
-                    'comparative_id': comparative_q,
-                })
+
+def _links_text_search(soup):
+    """
+    Strategy 2 — text-based search across ALL anchor tags.
+
+    Does NOT rely on any container class or ID — only on the link text
+    matching the quarterly pattern.  Survives any CSS/class rename on the site.
+    Uses a relaxed regex to tolerate capitalisation variants.
+    """
+    _RELAXED_Q_RE = re.compile(
+        r'^(1st|2nd|3rd)\s+quarter\s+fiscal\s+(\d{4})$',
+        re.IGNORECASE,
+    )
+    results = []
+    seen: set[tuple[int, int]] = set()
+    for a in soup.find_all('a', href=True):
+        link_text = a.get_text(strip=True)
+        href      = _absolute_url(a['href'])
+        if not href.lower().endswith('.pdf'):
+            continue
+        if any(kw in link_text.lower() for kw in ('results', 'highlight', 'overview')):
+            continue
+        m = _RELAXED_Q_RE.match(link_text.strip())
+        if not m:
+            continue
+        q_num = _ORDINAL_TO_NUM.get(m.group(1).lower())
+        fy    = int(m.group(2))
+        if q_num is None or fy < config.START_FISCAL_YEAR:
+            continue
+        key = (q_num, fy)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(_make_link_item(link_text, href, q_num, fy))
+    results.sort(key=lambda x: (x['cpp_fy'], x['cpp_quarter']))
+    return results
+
+
+def _parse_quarter_from_url(url: str):
+    """
+    Try to extract (q_num, fy) from a CPP PDF URL filename.
+
+    Handles patterns like 'Q2-F27-...pdf', 'Q1-F2027-...pdf', 'Q3-F26-...pdf'.
+    Returns (None, None) if no match.
+    """
+    filename = url.split('/')[-1].split('?')[0]
+    m = re.search(r'[Qq]([123])[^0-9]*[Ff](20\d{2}|\d{2})\b', filename)
+    if m:
+        q_num  = int(m.group(1))
+        fy_raw = m.group(2)
+        fy     = int(fy_raw) if len(fy_raw) == 4 else 2000 + int(fy_raw)
+        return q_num, fy
+    return None, None
+
+
+def _links_broad_pdf_scan(soup):
+    """
+    Strategy 3 — broadest fallback: scan every PDF link on the page.
+
+    Accepts any <a href="*.pdf"> whose anchor text OR URL filename encodes a
+    quarterly pattern.  Uses a relaxed regex that accepts 'first'/'second'/'third'
+    synonyms and mixed capitalisation.  Also tries to parse quarter info directly
+    from the URL filename (e.g. 'Q2-F27-Financial-Statements.pdf').
+
+    This strategy survives even if CPP completely rewrites link text formatting,
+    as long as the PDF filename convention stays recognisable.
+    """
+    _BROAD_Q_RE = re.compile(
+        r'\b(1st|2nd|3rd|first|second|third)\b.*?\bquarter\b.*?\bfiscal\b.*?\b(20\d{2})\b',
+        re.IGNORECASE,
+    )
+    _ORDINAL_BROAD = {
+        '1st': 1, 'first': 1,
+        '2nd': 2, 'second': 2,
+        '3rd': 3, 'third': 3,
+    }
+    results = []
+    seen: set[tuple[int, int]] = set()
+
+    for a in soup.find_all('a', href=True):
+        href = _absolute_url(a['href'])
+        if not href.lower().endswith('.pdf'):
+            continue
+        if any(kw in href.lower() for kw in ('highlight', 'overview', 'annual')):
+            continue
+
+        link_text = a.get_text(strip=True)
+
+        # First try parsing from anchor text
+        q_num, fy = None, None
+        m = _BROAD_Q_RE.search(link_text)
+        if m:
+            q_num = _ORDINAL_BROAD.get(m.group(1).lower())
+            fy    = int(m.group(2))
+
+        # Fallback: try parsing from URL filename
+        if q_num is None:
+            q_num, fy = _parse_quarter_from_url(href)
+
+        if q_num is None or fy is None or fy < config.START_FISCAL_YEAR:
+            continue
+        if any(kw in link_text.lower() for kw in ('results', 'highlight', 'overview')):
+            continue
+
+        key = (q_num, fy)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        display_text = link_text or f'{q_num}th quarter fiscal {fy}'
+        results.append(_make_link_item(display_text, href, q_num, fy))
 
     results.sort(key=lambda x: (x['cpp_fy'], x['cpp_quarter']))
-    logger.info(
-        f'Collected {len(results)} quarterly FS PDF links '
-        f'(FY{config.START_FISCAL_YEAR}+)'
-    )
     return results
+
+
+def _collect_quarterly_links(page_source):
+    """
+    Multi-strategy parser — returns all quarterly FS PDF items for
+    FY >= START_FISCAL_YEAR, sorted oldest quarter first.
+
+    Three strategies are tried in order of specificity:
+      1. Structural  — relies on CSS classes/IDs (fast, specific, may break on site redesign)
+      2. Text-search — scans all <a> tags by anchor text pattern (CSS-agnostic)
+      3. Broad scan  — scans all PDF links; also inspects URL filenames (most resilient)
+
+    Raises RuntimeError if all strategies return 0 links.  Warns if the total is
+    below config.MIN_EXPECTED_LINKS (site may be partially unavailable).
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(page_source, 'html.parser')
+
+    links = _links_structural(soup)
+    if links:
+        logger.info('HTML strategy 1 (structural): %d quarterly links found', len(links))
+    else:
+        logger.warning(
+            'HTML strategy 1 (structural) returned 0 links — '
+            'CPP site HTML may have changed; trying text-search fallback'
+        )
+        links = _links_text_search(soup)
+        if links:
+            logger.warning(
+                'HTML strategy 2 (text-search): %d links — '
+                'structural selectors no longer match, update _links_structural()',
+                len(links),
+            )
+        else:
+            logger.warning(
+                'HTML strategy 2 (text-search) also returned 0 links — '
+                'trying broad PDF scan'
+            )
+            links = _links_broad_pdf_scan(soup)
+            if links:
+                logger.warning(
+                    'HTML strategy 3 (broad-pdf-scan): %d links — '
+                    'site HTML has changed significantly; consider updating scraper',
+                    len(links),
+                )
+            else:
+                raise RuntimeError(
+                    'All HTML parsing strategies returned 0 quarterly links.\n'
+                    '  Strategies tried: structural-CSS, text-search, broad-pdf-scan\n'
+                    f'  Source: {config.BASE_URL}\n'
+                    '  The CPP website HTML structure has changed in an unrecognised way.\n'
+                    '  Inspect the page source and update scraper._links_structural().'
+                )
+
+    if len(links) < config.MIN_EXPECTED_LINKS:
+        logger.warning(
+            'Only %d quarterly links found — expected at least %d. '
+            'Some fiscal years may be missing or the site is partially unavailable.',
+            len(links), config.MIN_EXPECTED_LINKS,
+        )
+
+    logger.info(
+        'Collected %d quarterly FS PDF links (FY%d+)',
+        len(links), config.START_FISCAL_YEAR,
+    )
+    return links
 
 
 # ── PDF download ──────────────────────────────────────────────────────────────

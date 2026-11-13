@@ -208,6 +208,16 @@ TABLE_KEYWORDS = [
     'public equities',
 ]
 
+# ── Extraction quality thresholds ────────────────────────────────────────────
+# Warn (don't raise) when a quarter has fewer populated codes than this.
+# 22 is the practical minimum for FY2025+ PDFs (CPP.INVESTFUNDS is blank for
+# older FY2022-FY2024 quarters by design, so 20 is the floor for those).
+MIN_EXPECTED_CODES = 20
+
+# Raise RuntimeError if the CPP website yields fewer quarterly links than this.
+# 3 = at least the current fiscal year's Q1/Q2/Q3 must be present.
+MIN_EXPECTED_LINKS = 3
+
 # ── META file template ────────────────────────────────────────────────────────
 META_TEMPLATE = {
     'FREQUENCY':            'Q',

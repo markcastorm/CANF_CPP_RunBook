@@ -69,6 +69,75 @@ def _extraction_results_to_rows(
     return rows, latest_quarters
 
 
+# ── Health summary ────────────────────────────────────────────────────────────
+
+def _run_health_summary(
+    prior_existing: set,
+    new_rows: dict,
+    pdf_infos: list,
+    results: list,
+    latest_quarters: Optional[list[str]],
+    run_dir,
+) -> None:
+    """
+    Log a structured end-of-run health summary.
+
+    Covers: download/extraction counts, code coverage per new quarter,
+    master CSV row delta, and a final SUCCESS / PARTIAL / WARN status line.
+    """
+    n_downloaded  = len(pdf_infos)
+    n_extracted   = sum(1 for _, r in results if r is not None)
+    n_failed      = n_downloaded - n_extracted
+
+    actually_new  = {qid for qid in new_rows if qid not in prior_existing}
+    updated_exist = {qid for qid in new_rows if qid in prior_existing}
+    total_after   = len(prior_existing) + len(actually_new)
+
+    issues: list[str] = []
+
+    sep = '=' * 62
+    logger.info(sep)
+    logger.info('CANF_CPP PIPELINE RUN SUMMARY')
+    logger.info(sep)
+    logger.info('  PDFs downloaded      : %d', n_downloaded)
+    logger.info('  PDFs extracted       : %d / %d succeeded', n_extracted, n_downloaded)
+
+    if n_failed:
+        logger.warning('  PDFs FAILED          : %d  <-- check logs above', n_failed)
+        issues.append(f'{n_failed} PDF extraction(s) failed')
+
+    if actually_new:
+        logger.info('  New quarters added   : %s', sorted(actually_new))
+    if updated_exist:
+        logger.info('  Existing qtrs updated: %s', sorted(updated_exist))
+
+    for qid in sorted(new_rows):
+        qdata    = new_rows[qid]
+        filled   = sum(1 for v in qdata.values() if v is not None)
+        expected = len(config.COLUMN_CODES)
+        status   = 'OK  ' if filled >= config.MIN_EXPECTED_CODES else 'WARN'
+        logger.info('  Code coverage  [%s] %s : %d/%d codes', status, qid, filled, expected)
+        if filled < config.MIN_EXPECTED_CODES:
+            issues.append(f'{qid} has only {filled}/{expected} codes populated')
+
+    logger.info('  Master CSV quarters  : %d  (was %d, +%d)', total_after, len(prior_existing), len(actually_new))
+
+    if latest_quarters:
+        logger.info('  LATEST quarters      : primary=%s  comparative=%s',
+                    latest_quarters[0], latest_quarters[1] if len(latest_quarters) > 1 else '—')
+
+    logger.info('  Output dir           : %s', run_dir)
+
+    if issues:
+        logger.warning('  Status               : PARTIAL  — %d issue(s):', len(issues))
+        for issue in issues:
+            logger.warning('    - %s', issue)
+    else:
+        logger.info('  Status               : SUCCESS')
+
+    logger.info(sep)
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def run() -> None:
@@ -84,7 +153,8 @@ def run() -> None:
 
     # ── 1. Discover what is already in the master CSV ─────────────────────────
     existing_quarters = scraper.load_existing_quarters()
-    logger.info('Existing master CSV quarters: %d', len(existing_quarters))
+    prior_count       = len(existing_quarters)
+    logger.info('Existing master CSV quarters: %d', prior_count)
 
     # ── 2. Download PDFs ──────────────────────────────────────────────────────
     if config.BACKFILL_ENABLED:
@@ -104,6 +174,10 @@ def run() -> None:
         pdf_paths,
         max_workers=config.BACKFILL_MAX_WORKERS,
     )
+
+    failed = [p for p, r in results if r is None]
+    if failed:
+        logger.warning('%d PDF(s) failed extraction: %s', len(failed), failed)
 
     # ── 4. Update master CSV ──────────────────────────────────────────────────
     new_rows, latest_quarters = _extraction_results_to_rows(results)
@@ -127,9 +201,10 @@ def run() -> None:
         logger.warning('No rows extracted from any PDF.')
 
     # ── 5. Generate output files ──────────────────────────────────────────────
-    if latest_quarters:
-        logger.info('Latest PDF quarters: %s', latest_quarters)
     file_generator.generate_outputs(run_dir, latest_quarters=latest_quarters)
+
+    # ── 6. Health summary ─────────────────────────────────────────────────────
+    _run_health_summary(existing_quarters, new_rows, pdf_infos, results, latest_quarters, run_dir)
 
     logger.info('=== CANF_CPP pipeline complete  run_dir=%s ===', run_dir)
 

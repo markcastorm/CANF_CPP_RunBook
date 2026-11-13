@@ -177,7 +177,7 @@ Parses CPP's financial results page HTML with BeautifulSoup. Key insight: **all 
 - Rejects links containing "results", "highlight", "overview"
 - Accepts only `"1st|2nd|3rd quarter fiscal YYYY"` pattern
 
-### Download strategy - `_download_pdf(url, dest_path, driver, cdn_cookies)`
+> ### Download strategy - `_download_pdf(url, dest_path, driver, cdn_cookies)`
 
 Two-stage:
 
