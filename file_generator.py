@@ -204,11 +204,11 @@ def _build_latest_wb(
     rows: dict[str, dict[str, Optional[float]]],
     latest_quarters: list[str],
 ) -> openpyxl.Workbook:
-    """Two-row workbook: primary quarter (row 3) + comparative quarter (row 4).
+    """Two-row workbook: comparative quarter (row 3) + primary quarter (row 4).
 
     latest_quarters = [primary_qid, comparative_qid]  — in PDF column order.
-    Missing quarters (not yet in master) are written as blank data rows so the
-    structure is always exactly 2 data rows.
+    Written in reverse so the base period (comparative) sits above the current
+    period (primary): e.g. 2026-Q1 on row 3, 2026-Q3 on row 4.
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -221,7 +221,7 @@ def _build_latest_wb(
     ws.append([''] + config.COLUMN_DESCRIPTIONS)
     _style_header_row(ws, 2, len(config.COLUMN_DESCRIPTIONS) + 1)
 
-    for qid in latest_quarters:
+    for qid in reversed(latest_quarters):
         qdata = rows.get(qid, {})
         row_data = [qid]
         for code in config.COLUMN_CODES:
