@@ -104,13 +104,20 @@ Dict mapping normalized PDF row label text → column code. Contains multiple al
 
 ### OTHER_ROW_CODES
 
-`'other'` appears twice in each PDF (once in receivables, once in liabilities). Resolved by count:
+`'other'` appears twice in each PDF (once in receivables, once in liabilities). Resolved by section tracking in `_parse_rows` — the parser emits `'other:investment receivables and other'` or `'other:investment liabilities'` depending on the last section header seen. `_map_rows` resolves to the right code from the tag. Ordinal-count fallback is kept for edge cases.
 
 ```python
 OTHER_ROW_CODES = {
     'investment_receivables': 'CPP.OTHERINVESTMENTRECEIVABLES...',
     'investment_liabilities': 'CPP.OTHERINVESTMENTLIABILITIES...',
 }
+```
+
+### Extraction quality thresholds
+
+```python
+MIN_EXPECTED_CODES = 20  # warn if fewer codes populated per quarter (of 23 total)
+MIN_EXPECTED_LINKS = 3   # raise RuntimeError if fewer quarterly links found on CPP website
 ```
 
 ---
@@ -121,9 +128,7 @@ Simple argparse wrapper. Three modes:
 
 - **Default**: calls `orchestrator.run()`
 - **`--backfill`**: calls `orchestrator.backfill_run()`
-- **`--extract-only <pdf> [pdf...]`**: calls `extractor.extract_all()` then `file_generator.update_master_csv()` directly — no Selenium
-
-**Note**: `--extract-only` currently calls `orchestrator._extraction_results_to_rows(results)` which now returns a tuple `(rows, latest_quarters)` but `main.py` only unpacks the first element. If this CLI mode is used, `latest_quarters` will be lost (LATEST xlsx won't be generated). Low priority since `rebuild_master.py` covers the offline use case better.
+- **`--extract-only <pdf> [pdf...]`**: calls `extractor.extract_all()` then `file_generator.update_master_csv()` directly — no Selenium. Correctly unpacks `(new_rows, latest_quarters)` from `_extraction_results_to_rows` so the LATEST xlsx is generated.
 
 ---
 
@@ -134,13 +139,14 @@ Simple argparse wrapper. Three modes:
 Main pipeline entry. Steps:
 
 1. `run_dir = file_generator.make_run_dir()` - creates `output/YYYYMMDD_HHMMSS/`
-2. `existing_quarters = scraper.load_existing_quarters()` - reads master CSV
+2. `existing_quarters = scraper.load_existing_quarters()` - reads master CSV; saves `prior_count` for health summary
 3. If `BACKFILL_ENABLED`: `scraper.discover_and_download(existing_quarters)` else `scraper.download()`
-4. `extractor.extract_all(pdf_paths, max_workers=...)` - parallel extraction
+4. `extractor.extract_all(pdf_paths, max_workers=...)` - parallel extraction; logs warning if any PDF returned `None`
 5. `new_rows, latest_quarters = _extraction_results_to_rows(results)` - flatten + find latest PDF
 6. `file_generator.update_master_csv(new_rows)` - upsert to master
 7. `scraper.mark_quarter_processed(...)` - write to state.json per PDF
 8. `file_generator.generate_outputs(run_dir, latest_quarters=latest_quarters)`
+9. `_run_health_summary(...)` - structured log block at end of every run
 
 ### `backfill_run()`
 
@@ -154,6 +160,27 @@ Temporarily sets `config.BACKFILL_ENABLED = True` then calls `run()`.
 - Flattens both columns (primary + comparative) of every PDF into `{qid: {code: value}}`
 - Identifies the PDF with the highest primary quarter ID as "latest"
 - Returns `latest_quarters = [primary_qid, comparative_qid]` for that PDF
+
+### `_run_health_summary(prior_existing, new_rows, pdf_infos, results, latest_quarters, run_dir)`
+
+Logs a structured summary block at the end of every run:
+
+```
+==============================================================
+CANF_CPP PIPELINE RUN SUMMARY
+  PDFs downloaded      : 2
+  PDFs extracted       : 2 / 2 succeeded
+  New quarters added   : ['2026-Q2', '2026-Q3']
+  Existing qtrs updated: ['2026-Q1']
+  Code coverage  [OK  ] 2026-Q3 : 23/23 codes
+  Master CSV quarters  : 23  (was 21, +2)
+  LATEST quarters      : primary=2026-Q3  comparative=2026-Q1
+  Status               : SUCCESS   ← or PARTIAL if any failure/low coverage
+==============================================================
+```
+
+- `Status: PARTIAL` if any PDF failed extraction or any quarter is below `MIN_EXPECTED_CODES`
+- Detects and logs `DATA LOSS` if master CSV quarter count decreases during a run
 
 ---
 
@@ -170,14 +197,26 @@ Temporarily sets `config.BACKFILL_ENABLED = True` then calls `run()`.
 
 ### Page parsing - `_collect_quarterly_links(page_source)`
 
-Parses CPP's financial results page HTML with BeautifulSoup. Key insight: **all fiscal year divs are present in the initial page source** - the "Load more" button only toggles CSS visibility, so a single page load is sufficient. No clicking needed.
+Multi-strategy dispatcher. Tries each strategy in order and uses the first that returns results. Raises `RuntimeError` if all three fail (triggers hard pipeline failure rather than silent empty run). Warns if fewer than `config.MIN_EXPECTED_LINKS` links found.
 
-- Looks for `<div class="fiscal-wrap" id="fiscal-YYYY">` elements
-- Inside each, finds `<h3>` containing "quarterly reports", then `<div class="moreInfo">` for PDF links
-- Rejects links containing "results", "highlight", "overview"
-- Accepts only `"1st|2nd|3rd quarter fiscal YYYY"` pattern
+**Strategy 1 — `_links_structural(soup)`** (primary)
+- Relies on `<div class="fiscal-wrap" id="fiscal-YYYY">` and `<div class="moreInfo">`
+- Fastest and most precise; fails if CPP redesigns IR page CSS/IDs
 
-> ### Download strategy - `_download_pdf(url, dest_path, driver, cdn_cookies)`
+**Strategy 2 — `_links_text_search(soup)`** (CSS-agnostic fallback)
+- Scans ALL `<a href="*.pdf">` tags on the page regardless of container
+- Matches anchor text against `"1st|2nd|3rd quarter fiscal YYYY"` (case-insensitive)
+- Survives any CSS class or ID rename
+
+**Strategy 3 — `_links_broad_pdf_scan(soup)`** (broadest fallback)
+- Also accepts `"first/second/third quarter fiscal YYYY"` text variants
+- Falls back to parsing the PDF URL filename via `_parse_quarter_from_url(url)`
+  - Handles patterns like `Q2-F27-...pdf` → `(2, 2027)`, `Q1-F2027-...pdf` → `(1, 2027)`
+- Survives link text format changes AND CSS restructuring simultaneously
+
+Each fallback logs a `WARNING` so you know the site has changed. Strategy 1 logs `INFO`.
+
+### Download strategy - `_download_pdf(url, dest_path, driver, cdn_cookies)`
 
 Two-stage:
 
@@ -237,11 +276,14 @@ Finds where data starts and ends in the line stream.
 - Newer PDFs start with `'Equities'` section header
 - Some older PDFs start data with `'Cash and cash equivalents'`
 
-**End**: first footnote marker after data. Three formats handled:
+**End**: first footnote marker after data. Formats handled (in order of check):
 
-1. Standalone Unicode superscript: `'¹'` (U+00B9) — matched by `_SUPERSCRIPT_DIGIT_RE = re.compile(r'^[¹²³⁰-⁹]$')`
-2. Standalone ASCII digit: `'1'` — confirmed by next line not being a number
-3. Inline footnote: `'1 Consists of all the financial...'` — digit + 10+ char text
+1. Standalone Unicode superscript: `'¹'` — matched by `_SUPERSCRIPT_DIGIT_RE`
+2. Standalone footnote symbol: `'†'`, `'‡'`, `'§'`, `'*'`, `'•'` — matched by `_FOOTNOTE_MARKER_RE`
+3. Standalone ASCII digit: `'1'` — confirmed by next line not being a number
+4. Digit/symbol + inline text: `'1 Consists of all the financial...'` — marker + 10+ char sentence
+
+**Fallback**: if no footnote marker found after exhausting all patterns, `end = len(lines)` (page boundary) and a `WARNING` is logged. The parser still runs rather than raising `ValueError` and dropping the whole PDF.
 
 ### `_parse_rows(lines)` — state machine
 
@@ -250,7 +292,19 @@ Processes the line stream between start and end bounds:
 - Skips `'$'` lines (dollar sign headers that appear in some PDFs)
 - Accumulates label lines in `current_parts` until 2 numbers are seen
 - When 2 numbers found: `label = _normalize(' '.join(current_parts))`, emit `(label, v1, v2)`
-- If a new non-number line arrives while `current_parts` holds a known section header, starts fresh
+- If a new non-number line arrives while `current_parts` holds a known section header, starts fresh and updates `current_section`
+- **Section tracking**: `current_section` is updated whenever a `SECTION_HEADERS` label is detected. When the label is `'other'`, it is tagged as `f'other:{current_section}'` before emission (e.g. `'other:investment liabilities'`). This makes `_map_rows` section-aware rather than relying on fragile ordinal counting.
+
+### `_map_rows(rows)` — label → code mapping
+
+Handles two forms of `'other'` label:
+
+- `'other:<section>'` — preferred; resolves from tag: `'receivable'` in section → `CPP.OTHERINVESTMENTRECEIVABLES`, else → `CPP.OTHERINVESTMENTLIABILITIES`
+- `'other'` — untagged fallback: ordinal count (first = receivables, second = liabilities)
+
+### `_validate_extraction_quality(pdf_name, data)`
+
+Called at the end of every `extract_pdf()`. Warns (never raises) if `len(data) < config.MIN_EXPECTED_CODES`. Normal values: 22/23 for FY2022–FY2024 (CPP.INVESTFUNDS blank by design), 23/23 for FY2025+.
 
 ### Number handling
 
@@ -379,9 +433,17 @@ output/
 
 ## Common Failure Modes
 
-### `end: None` in `_find_data_bounds`
+### `_find_data_bounds: no footnote marker detected` (WARNING in logs)
 
-Footnote marker format not recognised. Check if the PDF has a new format. The three formats handled are: standalone Unicode superscript (`¹`), standalone ASCII digit (`1`), inline footnote text (`1 Consists of...`).
+New footnote symbol not in `_FOOTNOTE_MARKER_RE`. The parser falls back to using the page boundary as `end` and continues — extraction still runs. Check the log for `Unmatched PDF row labels` to see if data was affected. If a new symbol is introduced, add it to `_FOOTNOTE_MARKER_RE` in `extractor.py`.
+
+### `EXTRACTION QUALITY: only N/23 codes populated` (WARNING in logs)
+
+Fewer codes than `MIN_EXPECTED_CODES = 20`. Either a new PDF format introduced new label text (add to `ROW_LABEL_TO_CODE`) or `_find_data_bounds` chose an incorrect boundary (inspect via `--extract-only`).
+
+### `All HTML parsing strategies returned 0 quarterly links` (RuntimeError — hard stop)
+
+All three scraper strategies failed. The CPP website HTML has changed in an unrecognised way. Inspect the page source and update `_links_structural()` in `scraper.py`. Strategies 2 and 3 should catch most changes automatically, so this error means even the PDF URL filename pattern changed.
 
 ### `ValueError: Could not extract 2 column dates`
 
