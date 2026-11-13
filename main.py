@@ -29,15 +29,14 @@ def _extract_only(pdf_paths: list[str]) -> None:
     import file_generator
 
     results  = extractor.extract_all(pdf_paths, max_workers=config.BACKFILL_MAX_WORKERS)
-    new_rows: dict = {}
 
     import orchestrator
-    new_rows = orchestrator._extraction_results_to_rows(results)
+    new_rows, latest_quarters = orchestrator._extraction_results_to_rows(results)
 
     if new_rows:
         file_generator.update_master_csv(new_rows)
         run_dir = file_generator.make_run_dir()
-        file_generator.generate_outputs(run_dir)
+        file_generator.generate_outputs(run_dir, latest_quarters=latest_quarters)
         logger.info('Outputs written to %s', run_dir)
     else:
         logger.warning('No data extracted.')
